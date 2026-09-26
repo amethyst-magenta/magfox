@@ -1,0 +1,14 @@
+[package]
+name = "magfox"
+version = "0.1.0"
+edition = "2021"
+description = "Firefox launcher with a managed local start-page server"
+license = "MIT"
+
+[dependencies]
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"
