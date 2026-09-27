@@ -2,8 +2,7 @@ use std::env;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io;
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, Stdio};
@@ -14,6 +13,7 @@ use std::time::{Duration, Instant};
 const FIREFOX: &str = "/usr/bin/firefox";
 const DARKHTTPD: &str = "/usr/bin/darkhttpd";
 const STARTPAGE: &str = "/usr/share/magfox/startpage";
+const SERVER_PORT: u16 = 8765;
 const LOCK_EX: i32 = 2;
 const LOCK_NB: i32 = 4;
 const SIGINT: i32 = 2;
@@ -38,7 +38,7 @@ enum InstanceLock {
 
 struct LockGuard {
     path: PathBuf,
-    file: File,
+    _file: File,
 }
 
 impl LockGuard {
@@ -62,7 +62,7 @@ impl LockGuard {
         // even if magfox is killed unexpectedly.
         let result = unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) };
         if result == 0 {
-            Ok(InstanceLock::Primary(Self { path, file }))
+            Ok(InstanceLock::Primary(Self { path, _file: file }))
         } else {
             let error = io::Error::last_os_error();
             if error.kind() == io::ErrorKind::WouldBlock {
@@ -71,13 +71,6 @@ impl LockGuard {
                 Err(error)
             }
         }
-    }
-
-    fn set_port(&mut self, port: u16) -> io::Result<()> {
-        self.file.set_len(0)?;
-        self.file.seek(SeekFrom::Start(0))?;
-        writeln!(self.file, "{port}")?;
-        self.file.sync_data()
     }
 }
 
@@ -159,11 +152,6 @@ fn socket_address(port: u16) -> SocketAddrV4 {
     SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)
 }
 
-fn find_free_port() -> io::Result<u16> {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
-    Ok(listener.local_addr()?.port())
-}
-
 fn startpage_path() -> PathBuf {
     if let Some(path) = env::var_os("MAGFOX_STARTPAGE").filter(|value| !value.is_empty()) {
         return PathBuf::from(path);
@@ -212,25 +200,6 @@ fn launch_arguments(arguments: &[OsString], port: u16) -> Vec<OsString> {
     launch_arguments
 }
 
-fn read_primary_port(path: &Path) -> io::Result<u16> {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let mut file = File::open(path)?;
-        let mut value = String::new();
-        file.read_to_string(&mut value)?;
-        if let Ok(port) = value.trim().parse::<u16>() {
-            return Ok(port);
-        }
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "the primary magfox port was not published",
-            ));
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-}
-
 fn wait_for_server(port: u16) -> io::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(5);
     let address = socket_address(port);
@@ -248,10 +217,9 @@ fn wait_for_server(port: u16) -> io::Result<()> {
     }
 }
 
-fn run_secondary(lock_path: &Path, arguments: &[OsString]) -> io::Result<()> {
-    let port = read_primary_port(lock_path)?;
-    wait_for_server(port)?;
-    let arguments = launch_arguments(arguments, port);
+fn run_secondary(_lock_path: &Path, arguments: &[OsString]) -> io::Result<()> {
+    wait_for_server(SERVER_PORT)?;
+    let arguments = launch_arguments(arguments, SERVER_PORT);
     let status = launch_firefox(&arguments)?.wait()?;
     if status.success() {
         Ok(())
@@ -299,11 +267,9 @@ fn firefox_is_running() -> bool {
         .any(|entry| is_firefox_process(&entry.path(), own_euid))
 }
 
-fn run_primary(mut lock: LockGuard, arguments: &[OsString]) -> io::Result<()> {
-    let port = find_free_port()?;
-    lock.set_port(port)?;
-    let mut server = ServerGuard::start(port)?;
-    let arguments = launch_arguments(arguments, port);
+fn run_primary(_lock: LockGuard, arguments: &[OsString]) -> io::Result<()> {
+    let mut server = ServerGuard::start(SERVER_PORT)?;
+    let arguments = launch_arguments(arguments, SERVER_PORT);
     let mut firefox = launch_firefox(&arguments)?;
     let mut firefox_status = None;
     let mut empty_checks = 0_u8;
